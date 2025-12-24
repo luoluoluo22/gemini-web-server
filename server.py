@@ -41,6 +41,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 静态文件路由 (用于示例图片)
+from fastapi.responses import FileResponse
+
+@app.get("/static/{filename}")
+async def serve_static(filename: str):
+    """提供静态文件（示例图片等）"""
+    file_path = os.path.join(os.path.dirname(__file__), filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="文件不存在")
+
 # 存储有效的 session token
 _admin_sessions = set()
 
@@ -58,6 +69,13 @@ def verify_admin_session(request: Request):
 # 默认可用模型列表 (Gemini 3 官网三个模型: 快速/思考/Pro)
 DEFAULT_MODELS = ["gemini-3.0-flash", "gemini-3.0-flash-thinking", "gemini-3.0-pro"]
 
+# 默认模型 ID (用于请求头选择模型)
+DEFAULT_MODEL_IDS = {
+    "flash": "56fdd199312815e2",
+    "pro": "e6fa609c3fa255c0", 
+    "thinking": "e051ce1aa80aa576",
+}
+
 # 配置存储
 _config = {
     "SNLM0E": "",
@@ -71,6 +89,7 @@ _config = {
     "PUSH_ID": "",
     "FULL_COOKIE": "",  # 存储完整cookie字符串
     "MODELS": DEFAULT_MODELS.copy(),  # 可用模型列表
+    "MODEL_IDS": DEFAULT_MODEL_IDS.copy(),  # 模型 ID 映射
 }
 
 # Cookie 字段映射 (浏览器cookie名 -> 配置字段名)
@@ -173,6 +192,27 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
         if models_found:
             result["models"] = sorted(list(models_found))
         
+        # 获取模型 ID (用于 x-goog-ext-525001261-jspb 请求头)
+        # 这些 ID 用于选择不同的模型版本
+        model_id_pattern = r'\["([a-f0-9]{16})","gemini[^"]*(?:flash|pro|thinking)[^"]*"\]'
+        model_ids = re.findall(model_id_pattern, html, re.IGNORECASE)
+        if model_ids:
+            result["model_ids"] = list(set(model_ids))
+        
+        # 备用方案：直接搜索 16 位十六进制 ID（在模型配置附近）
+        if not result.get("model_ids"):
+            # 搜索类似 "56fdd199312815e2" 的模式
+            hex_id_pattern = r'"([a-f0-9]{16})"'
+            # 在包含 gemini 或 model 的上下文中查找
+            context_pattern = r'.{0,100}(?:gemini|model|flash|pro|thinking).{0,100}'
+            contexts = re.findall(context_pattern, html, re.IGNORECASE)
+            hex_ids = set()
+            for ctx in contexts:
+                ids = re.findall(hex_id_pattern, ctx)
+                hex_ids.update(ids)
+            if hex_ids:
+                result["model_ids"] = list(hex_ids)
+        
         return result
     except Exception:
         return result
@@ -246,6 +286,7 @@ def get_client():
         snlm0e=_config["SNLM0E"],
         cookies_str=cookies,
         push_id=_config.get("PUSH_ID") or None,
+        model_ids=_config.get("MODEL_IDS") or DEFAULT_MODEL_IDS,
         debug=False,
     )
     return _client
@@ -405,6 +446,32 @@ def get_admin_html():
                     </div>
                 </div>
                 
+                <div class="section">
+                    <div class="section-title">🎯 模型 ID 配置 <span class="optional">(可选，如果模型切换失效请更新)</span></div>
+                    <div class="info-box">
+                        <strong>获取方法：</strong>F12 → Network → 在 Gemini 中切换模型发送消息 → 找到请求头 <code>x-goog-ext-525001261-jspb</code> → 复制整个数组值粘贴到下方输入框
+                    </div>
+                    <div class="form-group">
+                        <label>快速解析 <span class="optional">(粘贴请求头数组自动提取 ID)</span></label>
+                        <input type="text" id="MODEL_ID_PARSER" placeholder='粘贴如: [1,null,null,null,"56fdd199312815e2",null,null,0,[4],null,null,2]'>
+                        <div id="parsedModelId" class="parsed-info" style="margin-top:10px;">
+                            <h4>✅ 已提取的模型 ID：</h4>
+                            <div id="parsedModelIdValue"></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>极速版 (Flash) ID</label>
+                        <input type="text" name="MODEL_ID_FLASH" id="MODEL_ID_FLASH" placeholder="56fdd199312815e2">
+                    </div>
+                    <div class="form-group">
+                        <label>Pro 版 ID</label>
+                        <input type="text" name="MODEL_ID_PRO" id="MODEL_ID_PRO" placeholder="e6fa609c3fa255c0">
+                    </div>
+                    <div class="form-group">
+                        <label>思考版 (Thinking) ID</label>
+                        <input type="text" name="MODEL_ID_THINKING" id="MODEL_ID_THINKING" placeholder="e051ce1aa80aa576">
+                    </div>
+                </div>
                 
                 <button type="submit" class="btn">💾 保存配置</button>
             </form>
@@ -415,17 +482,78 @@ def get_admin_html():
                 <h3>📡 API 调用信息</h3>
                 <p>Base URL: <strong id="baseUrl"></strong></p>
                 <p>API Key: <strong id="apiKey"></strong></p>
+                <p>可用模型: <code>gemini-3.0-flash</code> | <code>gemini-3.0-pro</code> | <code>gemini-3.0-flash-thinking</code></p>
+                
+                <h4 style="margin-top:15px;">💬 文本对话</h4>
 <pre>from openai import OpenAI
 client = OpenAI(base_url="<span id="codeUrl"></span>", api_key="<span id="codeKey"></span>")
+
 response = client.chat.completions.create(
-    model="gemini",
+    model="gemini-3.0-flash",  # 或 gemini-3.0-pro / gemini-3.0-flash-thinking
     messages=[{"role": "user", "content": "你好"}]
-)</pre>
+)
+print(response.choices[0].message.content)</pre>
+
+                <h4 style="margin-top:15px;">🖼️ 图片识别</h4>
+<pre>import base64
+from openai import OpenAI
+client = OpenAI(base_url="<span id="codeUrl2"></span>", api_key="<span id="codeKey2"></span>")
+
+# 读取本地图片
+with open("image.png", "rb") as f:
+    img_b64 = base64.b64encode(f.read()).decode()
+
+response = client.chat.completions.create(
+    model="gemini-3.0-flash",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "请描述这张图片"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+        ]
+    }]
+)
+print(response.choices[0].message.content)</pre>
+
+                <h4 style="margin-top:15px;">🌊 流式响应</h4>
+<pre>stream = client.chat.completions.create(
+    model="gemini-3.0-flash",
+    messages=[{"role": "user", "content": "写一首诗"}],
+    stream=True
+)
+for chunk in stream:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)</pre>
+
+                <h4 style="margin-top:15px;">📷 示例图片</h4>
+                <p style="font-size:12px;color:#666;">以下是 image.png 示例图片，可用于测试图片识别功能（点击放大）：</p>
+                <img id="sampleImage" src="/static/image.png" alt="示例图片" style="max-width:300px;border-radius:8px;margin-top:10px;border:1px solid #ddd;cursor:pointer;" onclick="showImageModal()" onerror="this.style.display='none';this.nextElementSibling.style.display='block';">
+                <p style="display:none;font-size:12px;color:#999;">（示例图片不可用，请确保 image.png 文件存在）</p>
             </div>
         </div>
     </div>
     
+    <!-- 图片放大模态框 -->
+    <div id="imageModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;justify-content:center;align-items:center;cursor:pointer;" onclick="hideImageModal()">
+        <img src="/static/image.png" alt="示例图片" style="max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 0 30px rgba(0,0,0,0.5);">
+        <span style="position:absolute;top:20px;right:30px;color:white;font-size:30px;cursor:pointer;">&times;</span>
+    </div>
+    
     <script>
+        // 图片放大功能
+        function showImageModal() {
+            document.getElementById('imageModal').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+        function hideImageModal() {
+            document.getElementById('imageModal').style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+        // ESC 键关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') hideImageModal();
+        });
+        
         const API_KEY = "''' + API_KEY + '''";
         const PORT = ''' + str(PORT) + ''';
         
@@ -433,6 +561,55 @@ response = client.chat.completions.create(
         document.getElementById('apiKey').textContent = API_KEY;
         document.getElementById('codeUrl').textContent = 'http://localhost:' + PORT + '/v1';
         document.getElementById('codeKey').textContent = API_KEY;
+        document.getElementById('codeUrl2').textContent = 'http://localhost:' + PORT + '/v1';
+        document.getElementById('codeKey2').textContent = API_KEY;
+        
+        // 解析模型 ID (从 x-goog-ext-525001261-jspb 数组中提取)
+        function parseModelId(input) {
+            try {
+                // 尝试解析 JSON 数组
+                const arr = JSON.parse(input);
+                if (Array.isArray(arr) && arr.length > 4 && typeof arr[4] === 'string') {
+                    return arr[4];
+                }
+            } catch (e) {
+                // 尝试用正则提取 16 位十六进制字符串
+                const match = input.match(/["\']([a-f0-9]{16})["\']/i);
+                if (match) {
+                    return match[1];
+                }
+            }
+            return null;
+        }
+        
+        // 监听模型 ID 解析输入
+        document.getElementById('MODEL_ID_PARSER').addEventListener('input', (e) => {
+            const modelId = parseModelId(e.target.value);
+            const container = document.getElementById('parsedModelIdValue');
+            const infoBox = document.getElementById('parsedModelId');
+            
+            if (modelId) {
+                container.innerHTML = '<div class="item">提取到的 ID: <span style="color:#059669;font-family:monospace;">' + modelId + '</span></div>' +
+                    '<div style="margin-top:10px;">' +
+                    '<button type="button" onclick="fillModelId(\\'flash\\', \\'' + modelId + '\\')" style="margin-right:5px;padding:5px 10px;cursor:pointer;">填入极速版</button>' +
+                    '<button type="button" onclick="fillModelId(\\'pro\\', \\'' + modelId + '\\')" style="margin-right:5px;padding:5px 10px;cursor:pointer;">填入Pro版</button>' +
+                    '<button type="button" onclick="fillModelId(\\'thinking\\', \\'' + modelId + '\\')" style="padding:5px 10px;cursor:pointer;">填入思考版</button>' +
+                    '</div>';
+                infoBox.style.display = 'block';
+            } else {
+                infoBox.style.display = 'none';
+            }
+        });
+        
+        // 填入模型 ID
+        function fillModelId(type, id) {
+            const fieldMap = {
+                'flash': 'MODEL_ID_FLASH',
+                'pro': 'MODEL_ID_PRO',
+                'thinking': 'MODEL_ID_THINKING'
+            };
+            document.getElementById(fieldMap[type]).value = id;
+        }
         
         // Cookie 字段映射
         const cookieFields = {
@@ -513,6 +690,12 @@ response = client.chat.completions.create(
                 document.getElementById('FULL_COOKIE').value = config.FULL_COOKIE;
                 showParsedFields(parseCookie(config.FULL_COOKIE));
             }
+            // 加载模型 ID
+            if (config.MODEL_IDS) {
+                document.getElementById('MODEL_ID_FLASH').value = config.MODEL_IDS.flash || '';
+                document.getElementById('MODEL_ID_PRO').value = config.MODEL_IDS.pro || '';
+                document.getElementById('MODEL_ID_THINKING').value = config.MODEL_IDS.thinking || '';
+            }
         }).catch(err => {
             console.log('加载配置失败:', err);
         });
@@ -521,6 +704,16 @@ response = client.chat.completions.create(
             e.preventDefault();
             const formData = new FormData(e.target);
             const data = Object.fromEntries(formData.entries());
+            
+            // 构建模型 ID 对象
+            data.MODEL_IDS = {
+                flash: data.MODEL_ID_FLASH || '',
+                pro: data.MODEL_ID_PRO || '',
+                thinking: data.MODEL_ID_THINKING || ''
+            };
+            delete data.MODEL_ID_FLASH;
+            delete data.MODEL_ID_PRO;
+            delete data.MODEL_ID_THINKING;
             
             const statusEl = document.getElementById('status');
             statusEl.className = 'status';
@@ -647,6 +840,17 @@ async def admin_save(request: Request):
         _config["MODELS"] = tokens["models"]
     else:
         _config["MODELS"] = DEFAULT_MODELS.copy()
+    
+    # 处理模型 ID 配置
+    model_ids = data.get("MODEL_IDS", {})
+    if model_ids:
+        # 只更新非空的值
+        if model_ids.get("flash"):
+            _config["MODEL_IDS"]["flash"] = model_ids["flash"]
+        if model_ids.get("pro"):
+            _config["MODEL_IDS"]["pro"] = model_ids["pro"]
+        if model_ids.get("thinking"):
+            _config["MODEL_IDS"]["thinking"] = model_ids["thinking"]
     
     save_config()
     _client = None

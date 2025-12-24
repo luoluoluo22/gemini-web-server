@@ -104,6 +104,7 @@ class GeminiClient:
         bl: str = None,
         cookies_str: str = None,
         push_id: str = None,
+        model_ids: dict = None,
         debug: bool = False,
     ):
         """
@@ -117,6 +118,7 @@ class GeminiClient:
             bl: BL 版本号 (可选，自动获取)
             cookies_str: 完整 cookie 字符串 (可选，替代单独设置)
             push_id: Push ID for image upload (必填用于图片上传)
+            model_ids: 模型 ID 映射 {"flash": "xxx", "pro": "xxx", "thinking": "xxx"}
             debug: 是否打印调试信息
         """
         self.secure_1psid = secure_1psid
@@ -126,6 +128,13 @@ class GeminiClient:
         self.bl = bl
         self.push_id = push_id
         self.debug = debug
+        
+        # 模型 ID 映射 (用于请求头选择模型)
+        self.model_ids = model_ids or {
+            "flash": "56fdd199312815e2",
+            "pro": "e6fa609c3fa255c0",
+            "thinking": "e051ce1aa80aa576",
+        }
         
         self.session = httpx.Client(
             timeout=1220.0,
@@ -444,6 +453,19 @@ class GeminiClient:
         session_id = str(uuid.uuid4()).upper()
         timestamp = int(time.time() * 1000)
         
+        # 模型映射: 将模型名称转换为 Gemini 内部模型标识
+        # [[0]] = gemini-3.0-pro (Pro 版)
+        # [[1]] = gemini-3.0-flash (快速版，默认)
+        # [[3]] = gemini-3.0-flash-thinking (思考版)
+        model_code = [[1]]  # 默认快速版
+        if model:
+            model_lower = model.lower()
+            if "pro" in model_lower:
+                model_code = [[0]]  # Pro 版
+            elif "thinking" in model_lower or "think" in model_lower:
+                model_code = [[3]]  # 思考版
+            # flash 或其他情况保持默认 [[1]]
+        
         # 构建内部 JSON 数组 (基于真实请求格式)
         # 第一个元素: [text, 0, null, image_data, null, null, 0]
         inner_data = [
@@ -464,7 +486,7 @@ class GeminiClient:
             None,
             None,
             None,
-            [[0]],  # 模型相关字段，暂时使用 0
+            model_code,  # 模型选择字段
             0,
             None,
             None,
@@ -573,6 +595,8 @@ class GeminiClient:
                     continue
             
             if final_text:
+                # 优化图片 URL 为原始高清尺寸
+                final_text = self._optimize_image_urls(final_text)
                 return final_text
                 
         except Exception as e:
@@ -580,6 +604,46 @@ class GeminiClient:
                 print(f"[DEBUG] 解析错误: {e}")
         
         return "无法解析响应"
+    
+    def _optimize_image_urls(self, text: str) -> str:
+        """优化文本中的 Google 图片 URL 为原始高清尺寸
+        
+        Google 图片 URL 参数说明:
+        - =w400 或 =h400: 指定宽度或高度
+        - =s400: 指定最大边长
+        - =s0 或 =w0-h0: 原始尺寸
+        """
+        import re
+        
+        def optimize_url(url: str) -> str:
+            # 匹配 googleusercontent 或 ggpht 图片 URL
+            if "googleusercontent" not in url and "ggpht" not in url:
+                return url
+            # 移除现有尺寸参数，添加原始尺寸参数
+            url = re.sub(r'=w\d+(-h\d+)?(-[a-zA-Z]+)*$', '=s0', url)
+            url = re.sub(r'=s\d+(-[a-zA-Z]+)*$', '=s0', url)
+            url = re.sub(r'=h\d+(-[a-zA-Z]+)*$', '=s0', url)
+            # 如果 URL 没有尺寸参数，添加 =s0
+            if not url.endswith('=s0') and '=' not in url.split('/')[-1]:
+                url += '=s0'
+            return url
+        
+        # 匹配 Markdown 图片语法和纯 URL
+        # Markdown: ![alt](url)
+        def replace_md_img(match):
+            alt = match.group(1)
+            url = match.group(2)
+            return f"![{alt}]({optimize_url(url)})"
+        
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replace_md_img, text)
+        
+        # 匹配独立的 Google 图片 URL
+        def replace_url(match):
+            return optimize_url(match.group(0))
+        
+        text = re.sub(r'https?://[^\s\)]+(?:googleusercontent|ggpht)[^\s\)]*', replace_url, text)
+        
+        return text
 
     
     def _extract_text(self, parsed_data: list) -> str:
@@ -718,6 +782,15 @@ class GeminiClient:
             "rt": "c",
         }
         
+        # 模型标识映射 (通过请求头 x-goog-ext-525001261-jspb 选择模型)
+        model_id = self.model_ids.get("flash", "56fdd199312815e2")  # 默认极速版
+        if model:
+            model_lower = model.lower()
+            if "pro" in model_lower:
+                model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
+            elif "thinking" in model_lower or "think" in model_lower:
+                model_id = self.model_ids.get("thinking", "e051ce1aa80aa576")
+        
         # 上传图片获取路径
         image_paths = []
         if images and len(images) > 0:
@@ -745,12 +818,18 @@ class GeminiClient:
             "at": self.snlm0e,
         }
         
+        # 模型选择请求头
+        model_headers = {
+            "x-goog-ext-525001261-jspb": json.dumps([1, None, None, None, model_id, None, None, 0, [4], None, None, 2], separators=(',', ':')),
+        }
+        
         # 构建日志记录
         gemini_request_log = {
             "url": url,
             "params": params,
             "text": text,
             "model": model,
+            "model_id": model_id,
             "has_images": len(images) > 0 if images else False,
             "image_paths": image_paths,
             "f_req_preview": req_data[:500] + "..." if len(req_data) > 500 else req_data,
@@ -759,58 +838,77 @@ class GeminiClient:
         if self.debug:
             print(f"[DEBUG] 请求 URL: {url}")
             print(f"[DEBUG] AT Token: {self.snlm0e[:30]}...")
-            print(f"[DEBUG] 模型: {model or '默认'}")
+            print(f"[DEBUG] 模型: {model or '默认'}, ID: {model_id}")
             if image_paths:
                 print(f"[DEBUG] 请求数据前300字符: {req_data[:300]}")
         
-        try:
-            resp = self.session.post(url, params=params, data=form_data)
+        # 重试机制
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.post(url, params=params, data=form_data, headers=model_headers, timeout=60.0)
             
-            if self.debug:
-                print(f"[DEBUG] 响应状态: {resp.status_code}")
-                print(f"[DEBUG] 响应内容前500字符: {resp.text[:500]}")
-                if image_paths:
-                    # 保存完整响应用于调试
-                    with open("debug_image_response.txt", "w", encoding="utf-8") as f:
-                        f.write(resp.text)
-                    print(f"[DEBUG] 完整响应已保存到 debug_image_response.txt")
-            
-            # 记录 Gemini 完整响应
-            self._log_gemini_call(gemini_request_log, resp.text)
-            
-            resp.raise_for_status()
-            self.request_count += 1
-            
-            reply_text = self._parse_response(resp.text)
-            
-            # 保存助手回复
-            self.messages.append(Message(role="assistant", content=reply_text))
-            
-            # 构建 OpenAI 格式响应
-            return ChatCompletionResponse(
-                id=f"chatcmpl-{self.conversation_id or 'gemini'}-{int(time.time())}",
-                created=int(time.time()),
-                model="gemini-web",
-                choices=[
-                    ChatCompletionChoice(
-                        index=0,
-                        message=Message(role="assistant", content=reply_text),
-                        finish_reason="stop"
+                if self.debug:
+                    print(f"[DEBUG] 响应状态: {resp.status_code}")
+                    print(f"[DEBUG] 响应内容前500字符: {resp.text[:500]}")
+                    if image_paths:
+                        # 保存完整响应用于调试
+                        with open("debug_image_response.txt", "w", encoding="utf-8") as f:
+                            f.write(resp.text)
+                        print(f"[DEBUG] 完整响应已保存到 debug_image_response.txt")
+                
+                # 记录 Gemini 完整响应
+                self._log_gemini_call(gemini_request_log, resp.text)
+                
+                resp.raise_for_status()
+                self.request_count += 1
+                
+                reply_text = self._parse_response(resp.text)
+                
+                # 保存助手回复
+                self.messages.append(Message(role="assistant", content=reply_text))
+                
+                # 构建 OpenAI 格式响应
+                return ChatCompletionResponse(
+                    id=f"chatcmpl-{self.conversation_id or 'gemini'}-{int(time.time())}",
+                    created=int(time.time()),
+                    model="gemini-web",
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=Message(role="assistant", content=reply_text),
+                            finish_reason="stop"
+                        )
+                    ],
+                    usage=Usage(
+                        prompt_tokens=len(text),
+                        completion_tokens=len(reply_text),
+                        total_tokens=len(text) + len(reply_text)
                     )
-                ],
-                usage=Usage(
-                    prompt_tokens=len(text),
-                    completion_tokens=len(reply_text),
-                    total_tokens=len(text) + len(reply_text)
                 )
-            )
-            
-        except httpx.HTTPStatusError as e:
-            self._log_gemini_call(gemini_request_log, e.response.text if hasattr(e, 'response') else "", error=f"HTTP {e.response.status_code}")
-            raise Exception(f"HTTP 错误: {e.response.status_code}")
-        except Exception as e:
-            self._log_gemini_call(gemini_request_log, "", error=str(e))
-            raise Exception(f"请求失败: {e}")
+                
+            except httpx.HTTPStatusError as e:
+                self._log_gemini_call(gemini_request_log, e.response.text if hasattr(e, 'response') else "", error=f"HTTP {e.response.status_code}")
+                raise Exception(f"HTTP 错误: {e.response.status_code}")
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+                # 网络连接问题，可重试
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 2, 4 秒
+                    print(f"⚠️  连接中断，{wait_time}秒后重试 ({attempt + 1}/{max_retries})...")
+                    time.sleep(wait_time)
+                    continue
+                self._log_gemini_call(gemini_request_log, "", error=str(e))
+                raise Exception(f"网络连接失败（已重试{max_retries}次）: {e}")
+            except Exception as e:
+                self._log_gemini_call(gemini_request_log, "", error=str(e))
+                raise Exception(f"请求失败: {e}")
+        
+        # 所有重试都失败
+        if last_error:
+            raise Exception(f"请求失败（已重试{max_retries}次）: {last_error}")
     
     def reset(self):
         """重置会话上下文"""
