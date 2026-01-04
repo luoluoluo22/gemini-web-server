@@ -44,6 +44,10 @@ app.add_middleware(
 # 静态文件路由 (用于示例图片)
 from fastapi.responses import FileResponse
 
+# 生成的媒体文件缓存目录
+MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "media_cache")
+os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
+
 @app.get("/static/{filename}")
 async def serve_static(filename: str):
     """提供静态文件（示例图片等）"""
@@ -51,6 +55,37 @@ async def serve_static(filename: str):
     if os.path.exists(file_path):
         return FileResponse(file_path)
     raise HTTPException(status_code=404, detail="文件不存在")
+
+@app.get("/media/{media_id}")
+async def serve_media(media_id: str):
+    """提供缓存的媒体文件"""
+    # 安全检查：只允许字母数字和下划线
+    if not media_id.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="无效的媒体 ID")
+    
+    # 查找匹配的文件
+    for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4"]:
+        file_path = os.path.join(MEDIA_CACHE_DIR, media_id + ext)
+        if os.path.exists(file_path):
+            return FileResponse(file_path)
+    
+    raise HTTPException(status_code=404, detail="媒体文件不存在")
+
+def cleanup_old_media(max_age_hours: int = 1):
+    """清理过期的媒体缓存文件"""
+    import time
+    now = time.time()
+    max_age_seconds = max_age_hours * 3600
+    
+    try:
+        for filename in os.listdir(MEDIA_CACHE_DIR):
+            file_path = os.path.join(MEDIA_CACHE_DIR, filename)
+            if os.path.isfile(file_path):
+                file_age = now - os.path.getmtime(file_path)
+                if file_age > max_age_seconds:
+                    os.remove(file_path)
+    except Exception:
+        pass
 
 # 存储有效的 session token
 _admin_sessions = set()
@@ -359,6 +394,9 @@ def get_client():
     if _config.get("APISID"):
         cookies += f"; APISID={_config['APISID']}"
     
+    # 构建媒体文件的基础 URL
+    media_base_url = f"http://localhost:{PORT}"
+    
     from client import GeminiClient
     _client = GeminiClient(
         secure_1psid=_config["SECURE_1PSID"],
@@ -367,6 +405,7 @@ def get_client():
         push_id=_config.get("PUSH_ID") or None,
         model_ids=_config.get("MODEL_IDS") or DEFAULT_MODEL_IDS,
         debug=False,
+        media_base_url=media_base_url,
     )
     return _client
 
