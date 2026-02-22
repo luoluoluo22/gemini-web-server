@@ -10,8 +10,9 @@ import random
 import string
 import base64
 import uuid
+import codecs
 import httpx
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 import time
@@ -1083,8 +1084,9 @@ class GeminiClient:
         image: bytes = None,
         image_url: str = None,
         reset_context: bool = False,
-        model: str = None
-    ) -> ChatCompletionResponse:
+        model: str = None,
+        stream: bool = False,
+    ) -> Union[ChatCompletionResponse, Iterator[Dict[str, Any]]]:
         """
         发送聊天请求 (OpenAI 兼容格式)
         
@@ -1155,6 +1157,8 @@ class GeminiClient:
             raise ValueError("消息内容不能为空")
         
         # 发送请求
+        if stream:
+            return self._send_request_stream(text, images, model)
         return self._send_request(text, images, model)
 
     
@@ -1313,6 +1317,230 @@ class GeminiClient:
         if last_error:
             raise Exception(f"请求失败（已重试{max_retries}次）: {last_error}")
     
+    def _extract_text_from_inner_json(self, inner_json: list) -> str:
+        """Extract reply text from a single inner JSON packet and update session IDs."""
+        try:
+            if not inner_json:
+                return ""
+
+            if len(inner_json) > 1 and inner_json[1]:
+                if isinstance(inner_json[1], list):
+                    if len(inner_json[1]) > 0:
+                        self.conversation_id = inner_json[1][0] or self.conversation_id
+                    if len(inner_json[1]) > 1:
+                        self.response_id = inner_json[1][1] or self.response_id
+
+            if len(inner_json) > 4 and inner_json[4]:
+                candidates = inner_json[4]
+                if candidates and len(candidates) > 0:
+                    candidate = candidates[0]
+                    if candidate and len(candidate) > 1 and candidate[1]:
+                        if len(candidate) > 0:
+                            self.choice_id = candidate[0] or self.choice_id
+                        text = candidate[1][0] if isinstance(candidate[1], list) else candidate[1]
+                        return text if isinstance(text, str) else str(text)
+        except Exception:
+            pass
+        return ""
+
+    def _send_request_stream(self, text: str, images: List[Dict] = None, model: str = None) -> Iterator[Dict[str, Any]]:
+        """True streaming path: parse Gemini length-prefixed frames and emit deltas."""
+        url = f"{self.BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+
+        params = {
+            "bl": self.bl,
+            "f.sid": "",
+            "hl": "zh-CN",
+            "_reqid": str(self.request_count * 100000 + random.randint(10000, 99999)),
+            "rt": "c",
+        }
+
+        model_id = self.model_ids.get("flash", "56fdd199312815e2")
+        if model:
+            model_lower = model.lower()
+            if "pro" in model_lower:
+                model_id = self.model_ids.get("pro", "e6fa609c3fa255c0")
+            elif "thinking" in model_lower or "think" in model_lower:
+                model_id = self.model_ids.get("thinking", "e051ce1aa80aa576")
+
+        image_paths = []
+        if images and len(images) > 0 and self.push_id:
+            for img in images:
+                img_data = base64.b64decode(img["data"])
+                image_paths.append(self._upload_image(img_data, img["mime_type"]))
+
+        req_data = self._build_request_data(text, images, image_paths, model)
+        form_data = {"f.req": req_data, "at": self.snlm0e}
+        model_headers = {
+            "x-goog-ext-525001261-jspb": json.dumps(
+                [1, None, None, None, model_id, None, None, 0, [4], None, None, 2],
+                separators=(",", ":"),
+            ),
+        }
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        chunk_model = model or "gemini-web"
+
+        yield {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": chunk_model,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+
+        full_text = ""
+        raw_lines: List[str] = []
+
+        def utf16_char_len(ch: str) -> int:
+            return 2 if ord(ch) > 0xFFFF else 1
+
+        def take_utf16_units(s: str, start: int, target_units: int) -> tuple[int, int]:
+            count = 0
+            used = 0
+            n = len(s)
+            while (start + count) < n and used < target_units:
+                c = s[start + count]
+                u = utf16_char_len(c)
+                if used + u > target_units:
+                    break
+                used += u
+                count += 1
+            return count, used
+
+        def parse_length_prefixed_frames(buffer: str) -> tuple[List[Any], str]:
+            frames: List[Any] = []
+            pos = 0
+            n = len(buffer)
+            while pos < n:
+                while pos < n and buffer[pos].isspace():
+                    pos += 1
+                if pos >= n:
+                    break
+
+                m = re.match(r"(\d+)\n", buffer[pos:])
+                if not m:
+                    break
+
+                frame_units = int(m.group(1))
+                marker_len = len(m.group(1))
+                start_content = pos + marker_len
+                char_count, used_units = take_utf16_units(buffer, start_content, frame_units)
+                if used_units < frame_units:
+                    break
+
+                end_content = start_content + char_count
+                chunk = buffer[start_content:end_content].strip()
+                pos = end_content
+
+                if not chunk:
+                    continue
+
+                try:
+                    parsed = json.loads(chunk)
+                    if isinstance(parsed, list):
+                        frames.extend(parsed)
+                    else:
+                        frames.append(parsed)
+                except Exception:
+                    continue
+
+            return frames, buffer[pos:]
+
+        def calc_delta(new_text: str, sent_text: str) -> str:
+            if not new_text:
+                return ""
+            if new_text.startswith(sent_text):
+                return new_text[len(sent_text):]
+            if sent_text.startswith(new_text):
+                return ""
+            common = 0
+            max_common = min(len(new_text), len(sent_text))
+            while common < max_common and new_text[common] == sent_text[common]:
+                common += 1
+            return new_text[common:]
+
+        def process_packet(packet: Any) -> Iterator[Dict[str, Any]]:
+            nonlocal full_text
+            if not isinstance(packet, list) or len(packet) < 3 or packet[0] != "wrb.fr" or not packet[2]:
+                return
+            try:
+                inner_json = json.loads(packet[2])
+                raw_lines.append(json.dumps([packet], ensure_ascii=False))
+                text_candidate = self._extract_text_from_inner_json(inner_json)
+                if text_candidate:
+                    delta = calc_delta(text_candidate, full_text)
+                    if delta:
+                        full_text = text_candidate
+                        yield {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": chunk_model,
+                            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                        }
+            except Exception:
+                return
+
+        with self.session.stream(
+            "POST",
+            url,
+            params=params,
+            data=form_data,
+            headers=model_headers,
+            timeout=60.0,
+        ) as resp:
+            resp.raise_for_status()
+            self.request_count += 1
+
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            stream_buffer = ""
+
+            for chunk_bytes in resp.iter_bytes():
+                if not chunk_bytes:
+                    continue
+
+                stream_buffer += decoder.decode(chunk_bytes, final=False)
+                if stream_buffer.startswith(")]}'"):
+                    stream_buffer = stream_buffer[4:].lstrip()
+
+                packets, stream_buffer = parse_length_prefixed_frames(stream_buffer)
+                for packet in packets:
+                    yield from process_packet(packet)
+
+                if len(stream_buffer) > 2_000_000:
+                    stream_buffer = ""
+
+            stream_buffer += decoder.decode(b"", final=True)
+            tail_packets, _ = parse_length_prefixed_frames(stream_buffer)
+            for packet in tail_packets:
+                yield from process_packet(packet)
+
+        final_reply = self._parse_response("\n".join(raw_lines)) if raw_lines else full_text
+        if not final_reply:
+            final_reply = full_text
+
+        if final_reply and len(final_reply) > len(full_text) and final_reply.startswith(full_text):
+            tail = final_reply[len(full_text):]
+            if tail:
+                yield {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": chunk_model,
+                    "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": None}],
+                }
+
+        self.messages.append(Message(role="assistant", content=final_reply))
+        yield {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": chunk_model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+
     def reset(self):
         """重置会话上下文"""
         self.conversation_id = ""
@@ -1348,4 +1576,8 @@ class OpenAICompatible:
                 messages: List[Dict] = None,
                 **kwargs
             ) -> ChatCompletionResponse:
-                return self.client.chat(messages=messages)
+                return self.client.chat(
+                    messages=messages,
+                    model=model,
+                    stream=bool(kwargs.get("stream", False)),
+                )

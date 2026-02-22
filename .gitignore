@@ -1,0 +1,17 @@
+﻿# Local config / secrets
+config_data.json
+*.local.json
+*.secret
+.env
+.env.*
+
+# Runtime logs
+api_logs.json
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local media cache
+media_cache/

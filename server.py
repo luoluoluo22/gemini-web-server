@@ -31,8 +31,8 @@ CONFIG_FILE = "config_data.json"
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin123"
 # Token 自动刷新配置
-TOKEN_REFRESH_INTERVAL_MIN = 200  # 刷新间隔最小秒数
-TOKEN_REFRESH_INTERVAL_MAX = 300  # 刷新间隔最大秒数
+TOKEN_REFRESH_INTERVAL_MIN = 1800  # 刷新间隔最小秒数（默认 30 分钟）
+TOKEN_REFRESH_INTERVAL_MAX = 3600  # 刷新间隔最大秒数（默认 60 分钟）
 TOKEN_AUTO_REFRESH = True  # 是否启用自动刷新
 TOKEN_BACKGROUND_REFRESH = True  # 是否启用后台定时刷新（防止长时间不用失效）
 # 媒体文件外网访问地址 (留空则使用 localhost)
@@ -1491,6 +1491,64 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
                         messages[i]["content"] = tools_prompt + original
                     break
         
+        if request.stream:
+            _last_user_messages_hash = get_user_messages_hash(request.messages)
+            stream_iter = client.chat(messages=messages, model=request.model, stream=True)
+
+            def generate_real_stream():
+                streamed_text_parts = []
+                last_chunk = None
+
+                for chunk in stream_iter:
+                    if not chunk:
+                        continue
+                    last_chunk = chunk
+
+                    try:
+                        choices = chunk.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {}) or {}
+                            piece = delta.get("content")
+                            if isinstance(piece, str) and piece:
+                                streamed_text_parts.append(piece)
+                    except Exception:
+                        pass
+
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+                # 流式也记录最终响应摘要，便于日志排查
+                try:
+                    full_stream_text = "".join(streamed_text_parts)
+                    completion_id_log = (last_chunk or {}).get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}")
+                    created_time_log = (last_chunk or {}).get("created", int(time.time()))
+                    response_log = {
+                        "id": completion_id_log,
+                        "object": "chat.completion",
+                        "created": created_time_log,
+                        "model": request.model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": full_stream_text},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                    }
+                    log_api_call(request_log, response_log)
+                except Exception:
+                    pass
+
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                generate_real_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                }
+            )
+
         response = client.chat(messages=messages, model=request.model)
         _last_user_messages_hash = get_user_messages_hash(request.messages)
         
