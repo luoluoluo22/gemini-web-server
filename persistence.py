@@ -96,16 +96,20 @@ class PersistenceManager:
         """将数据库上传到 Hugging Face Dataset"""
         try:
             from huggingface_hub import HfApi
+            if not self.hf_token:
+                print("❌ 云端备份失败: 未检测到 HF_TOKEN 环境变量")
+                return
+            
             api = HfApi(token=self.hf_token)
-            print(f"[*] 正在备份数据库到云端 [{self.dataset_repo}]...")
+            print(f"[*] 正在备份数据库到云端: {self.db_path} -> {self.dataset_repo} ...")
             
             api.upload_file(
                 path_or_fileobj=self.db_path,
                 path_in_repo=self.db_path,
                 repo_id=self.dataset_repo,
                 repo_type="dataset",
-                commit_message=f"Persist Gemini cookies at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                commit_message=f"Persist Gemini db at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            print("✅ 云端备份成功")
+            print("✅ 云端备份成功！文件已推送到 Dataset。")
         except Exception as e:
-            print(f"❌ 云端备份失败: {e}")
+            print(f"❌ 云端备份失败，详细错误: {str(e)}")
