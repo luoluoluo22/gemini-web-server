@@ -23,21 +23,27 @@ import secrets
 import asyncio
 
 # ============ 配置 ============
-API_KEY = "sk-geminixxxxx"
+API_KEY = os.getenv("API_KEY", "sk-geminixxxxx")
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = int(os.getenv("PORT", 7860))
 CONFIG_FILE = "config_data.json"
 # 后台登录账号密码
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 # Token 自动刷新配置
 TOKEN_REFRESH_INTERVAL_MIN = 1800  # 刷新间隔最小秒数（默认 30 分钟）
 TOKEN_REFRESH_INTERVAL_MAX = 3600  # 刷新间隔最大秒数（默认 60 分钟）
 TOKEN_AUTO_REFRESH = True  # 是否启用自动刷新
 TOKEN_BACKGROUND_REFRESH = True  # 是否启用后台定时刷新（防止长时间不用失效）
-# 媒体文件外网访问地址 (留空则使用 localhost)
-MEDIA_BASE_URL = "http://127.0.0.1:8000"  # 例如: "https://your-domain.com" 或 "http://your-ip:8000"
+# 媒体文件外网访问地址
+# 在 Hugging Face Spaces 中，可以直接获取 SPACE_ID 来构造 URL
+SPACE_ID = os.getenv("SPACE_ID")
+if SPACE_ID:
+    MEDIA_BASE_URL = f"https://{SPACE_ID.replace('/', '-')}.hf.space"
+else:
+    MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", "http://127.0.0.1:7860")
 # ==============================
+
 
 import random
 from datetime import datetime
@@ -256,7 +262,7 @@ def fetch_tokens_from_page(cookies_str: str) -> dict:
         if model_ids:
             result["model_ids"] = list(set(model_ids))
         
-        # 备用方案：直接搜索 16 位十六进制 ID（在模型配置附近）
+        #备用方案：直接搜索 16 位十六进制 ID（在模型配置附近）
         if not result.get("model_ids"):
             # 搜索类似 "56fdd199312815e2" 的模式
             hex_id_pattern = r'"([a-f0-9]{16})"'
