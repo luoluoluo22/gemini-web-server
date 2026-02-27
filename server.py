@@ -1202,6 +1202,10 @@ async def admin_save(request: Request):
         if model_ids.get("thinking"):
             _config["MODEL_IDS"]["thinking"] = model_ids["thinking"]
     
+    # 更新 API Key
+    if data.get("API_KEY"):
+        _config["API_KEY"] = data["API_KEY"]
+    
     save_config()
     _client = None
     
