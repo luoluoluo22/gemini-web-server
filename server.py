@@ -21,6 +21,15 @@ import httpx
 import hashlib
 import secrets
 import asyncio
+from persistence import PersistenceManager
+
+# ============ 持久化配置 ============
+# 如果要在 HF 上持久化，请设置 DATASET_REPO_ID 环境变量（例如: 'luoluoluo22/gemini-config'）
+pm = PersistenceManager(
+    db_path="data.sqlite", 
+    dataset_repo=os.getenv("DATASET_REPO_ID"),
+    hf_token=os.getenv("HF_TOKEN")
+)
 
 # ============ 配置 ============
 API_KEY = os.getenv("API_KEY", "sk-geminixxxxx")
@@ -139,7 +148,7 @@ DEFAULT_MODEL_IDS = {
     "thinking": "e051ce1aa80aa576",
 }
 
-# 配置存储
+# 配置存储 (内存中的镜像，初始为默认值)
 _config = {
     "SNLM0E": "",
     "SECURE_1PSID": "",
@@ -532,39 +541,14 @@ def parse_tool_calls(content: str) -> tuple:
 
 
 def load_config():
-    """
-    加载配置，优先级:
-    1. config_data.json (前端保存的配置)
-    2. config.py (本地开发配置，仅作为备用)
-    """
+    """从本地 SQLite 数据库加载配置"""
     global _config
-    loaded_from_json = False
-    
-    # 优先从 JSON 文件加载
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                if saved.get("SNLM0E") and saved.get("SECURE_1PSID"):
-                    _config.update(saved)
-                    loaded_from_json = True
-        except:
-            pass
-    
-    # 如果 JSON 没有有效配置，尝试从 config.py 加载
-    if not loaded_from_json:
-        try:
-            import config
-            for key in _config:
-                if hasattr(config, key) and getattr(config, key):
-                    _config[key] = getattr(config, key)
-        except:
-            pass
+    _config = pm.get_all_config(_config)
 
 
 def save_config():
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(_config, f, indent=2, ensure_ascii=False)
+    """保存配置到 SQLite 并同步到云端"""
+    pm.save_config(_config)
 
 
 def get_client(auto_refresh: bool = True):

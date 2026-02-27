@@ -1,3 +1,12 @@
+---
+title: Gemini Open Relay
+emoji: 🚀
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+---
+
 # Gemini Web 转 OpenAI API
 
 基于 Gemini 网页版的逆向工程，提供 OpenAI 兼容 API 服务。
@@ -57,10 +66,10 @@ print(response.choices[0].message.content)
 
 ## 📡 API 信息
 
-| 项目 | 值 |
-|------|-----|
-| Base URL | `http://localhost:8000/v1` |
-| API Key | `sk-geminixxxxx` |
+| 项目     | 值                            |
+| -------- | ----------------------------- |
+| Base URL | `http://localhost:8000/v1`    |
+| API Key  | `sk-geminixxxxx`              |
 | 后台地址 | `http://localhost:8000/admin` |
 
 ### 可用模型
@@ -182,16 +191,16 @@ MEDIA_BASE_URL = ""                   # 媒体外网地址，如 https://your-do
 
 ## 📁 文件说明
 
-| 文件/文件夹 | 说明 |
-|-------------|------|
-| `server.py` | API 服务 + Web 后台 |
-| `client.py` | Gemini 逆向客户端 |
-| `demo_chat.py` | 完整调用示例（文本/单图/多图/生成） |
-| `media_cache/` | AI 返回图片的中转缓存文件夹 |
-| `image.png` | Cookie 获取示例图 |
-| `a.png` / `b.png` | 多图问答示意图 |
-| `requirements.txt` | Python 依赖 |
-| `config_data.json` | 运行时配置（自动生成） |
+| 文件/文件夹        | 说明                                |
+| ------------------ | ----------------------------------- |
+| `server.py`        | API 服务 + Web 后台                 |
+| `client.py`        | Gemini 逆向客户端                   |
+| `demo_chat.py`     | 完整调用示例（文本/单图/多图/生成） |
+| `media_cache/`     | AI 返回图片的中转缓存文件夹         |
+| `image.png`        | Cookie 获取示例图                   |
+| `a.png` / `b.png`  | 多图问答示意图                      |
+| `requirements.txt` | Python 依赖                         |
+| `config_data.json` | 运行时配置（自动生成）              |
 
 ## 📄 License
 
