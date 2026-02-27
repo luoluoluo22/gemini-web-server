@@ -134,6 +134,7 @@ def generate_session_token():
 def verify_admin_session(request: Request):
     """验证管理员 session"""
     token = request.cookies.get("admin_session")
+    # 增加调试日志
     if not token or token not in _admin_sessions:
         return False
     return True
@@ -160,6 +161,7 @@ _config = {
     "APISID": "",
     "PUSH_ID": "",
     "FULL_COOKIE": "",  # 存储完整cookie字符串
+    "API_KEY": os.getenv("API_KEY", "sk-geminixxxxx"), # 动态 API Key
     "MODELS": DEFAULT_MODELS.copy(),  # 可用模型列表
     "MODEL_IDS": DEFAULT_MODEL_IDS.copy(),  # 模型 ID 映射
 }
@@ -782,6 +784,14 @@ def get_admin_html():
                         <input type="text" name="MODEL_ID_THINKING" id="MODEL_ID_THINKING" placeholder="e051ce1aa80aa576">
                     </div>
                 </div>
+
+                <div class="section">
+                    <div class="section-title">🔐 安全配置</div>
+                    <div class="form-group">
+                        <label>API Key (调用接口时 Bearer 后的密钥)</label>
+                        <input type="text" name="API_KEY" id="API_KEY" placeholder="sk-geminixxxxx">
+                    </div>
+                </div>
                 
                 <button type="submit" class="btn">💾 保存配置</button>
             </form>
@@ -1032,6 +1042,9 @@ for chunk in stream:
                 document.getElementById('MODEL_ID_PRO').value = config.MODEL_IDS.pro || '';
                 document.getElementById('MODEL_ID_THINKING').value = config.MODEL_IDS.thinking || '';
             }
+            if (config.API_KEY) {
+                document.getElementById('API_KEY').value = config.API_KEY || '';
+            }
         }).catch(err => {
             console.log('加载配置失败:', err);
         });
@@ -1114,7 +1127,8 @@ async def admin_login(request: Request):
         token = generate_session_token()
         _admin_sessions.add(token)
         response = JSONResponse({"success": True, "message": "登录成功"})
-        response.set_cookie(key="admin_session", value=token, httponly=True, max_age=86400)
+        # 设置长期有效的 Cookie (10年)
+        response.set_cookie(key="admin_session", value=token, httponly=True, max_age=315360000, samesite="lax")
         return response
     else:
         return {"success": False, "message": "用户名或密码错误"}
@@ -1281,9 +1295,11 @@ class ChatCompletionResponse(BaseModel):
 
 
 def verify_api_key(authorization: str = Header(None)):
-    if not API_KEY:
+    # 优先使用配置中的 API_KEY
+    current_key = _config.get("API_KEY") or API_KEY
+    if not current_key:
         return True
-    if not authorization or not authorization.startswith("Bearer ") or authorization[7:] != API_KEY:
+    if not authorization or not authorization.startswith("Bearer ") or authorization[7:] != current_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
